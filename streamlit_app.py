@@ -48,33 +48,41 @@ def read_dfa_report(file):
 
 def read_tag_sheet(file):
     xl = pd.ExcelFile(file, engine='openpyxl')
-    sheet = next(
-        (s for s in xl.sheet_names
-         if 'tag' in s.lower() and 'legacy' not in s.lower() and 'tracking' not in s.lower()),
-        xl.sheet_names[0]
-    )
-    df_raw = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
 
-    hdr_idx = None
-    for i, row in df_raw.iterrows():
-        vals = [str(v).lower().strip() for v in row.values]
-        if 'placement id' in vals:
-            hdr_idx = i
+    # Find the sheet that actually contains Placement ID + a line item column
+    # (sheet name varies across clients — scan all sheets)
+    chosen_sheet = None
+    chosen_hdr   = None
+    for sheet in xl.sheet_names:
+        if 'legacy' in sheet.lower():
+            continue
+        df_raw = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl', nrows=30)
+        for i, row in df_raw.iterrows():
+            vals = [str(v).lower().strip() for v in row.values]
+            has_pid  = 'placement id' in vals
+            has_line = any(re.search(r'line.*(item|#)', v) for v in vals)
+            if has_pid and has_line:
+                chosen_sheet = sheet
+                chosen_hdr   = i
+                break
+        if chosen_sheet:
             break
-    if hdr_idx is None:
-        raise ValueError("Could not find 'Placement ID' header in tag sheet.")
 
-    headers = df_raw.iloc[hdr_idx].tolist()
-    data    = df_raw.iloc[hdr_idx + 1:].copy()
+    if chosen_sheet is None:
+        raise ValueError(
+            "Could not find a sheet with both 'Placement ID' and a Line Item column. "
+            "Check that the correct tag mapping file was uploaded."
+        )
+
+    df_raw  = pd.read_excel(file, sheet_name=chosen_sheet, header=None, engine='openpyxl')
+    headers = df_raw.iloc[chosen_hdr].tolist()
+    data    = df_raw.iloc[chosen_hdr + 1:].copy()
     data.columns = headers
     data = data.reset_index(drop=True)
 
     pid_col  = next((c for c in data.columns if str(c).lower().strip() == 'placement id'), None)
     line_col = next((c for c in data.columns if re.search(r'line.*(item|#)', str(c).lower())), None)
     name_col = next((c for c in data.columns if 'placement name' in str(c).lower()), None)
-
-    if not pid_col or not line_col:
-        raise ValueError(f"Tag sheet is missing required columns. Found: {list(data.columns)}")
 
     keep = [pid_col, line_col] + ([name_col] if name_col else [])
     df   = data[keep].dropna(subset=[pid_col]).copy()
@@ -86,6 +94,8 @@ def read_tag_sheet(file):
     df['line_item'] = df['line_item'].apply(
         lambda x: str(int(float(x))) if pd.notna(x) and str(x).replace('.', '').isdigit() else str(x).strip()
     )
+    # Deduplicate — some tag sheets have multiple rows per placement (one per ad/creative)
+    df = df.drop_duplicates(subset=['placement_id']).reset_index(drop=True)
     return df
 
 
