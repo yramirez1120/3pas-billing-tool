@@ -226,13 +226,11 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
                 '_first_in_line': True,
             })
             verification.append({
-                'Line':            line_int,
-                'Position':        pos_path,
-                'DFA Impressions': 'N/A — 1st Party',
-                'Internal AJ':     f"{int(aj):,}",
-                'Difference':      '—',
-                'Billed $':        f"${ak:,.3f}",
-                'Status':          '✅ OK — 1st Party (Mobile App / Interstitial)',
+                'Line':     line_int,
+                'Position': pos_path,
+                'AJ':       f"{int(aj):,}",
+                'DFA / 1P': f"{int(aj):,} (1P)",
+                'Action':   '✅ Approved',
             })
             continue
 
@@ -273,13 +271,11 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
                 '_first_in_line': True,
             })
             verification.append({
-                'Line':            line_int,
-                'Position':        pos_path,
-                'DFA Impressions': 'No DFA match found',
-                'Internal AJ':     f"{int(aj):,}",
-                'Difference':      '—',
-                'Billed $':        f"${ak:,.3f}",
-                'Status':          '⚠️ Fallback — No DFA match (review manually)',
+                'Line':     line_int,
+                'Position': pos_path,
+                'AJ':       f"{int(aj):,}",
+                'DFA / 1P': 'No DFA match',
+                'Action':   '⚠️ No DFA match — verify AJ manually',
             })
             continue
 
@@ -289,29 +285,27 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
 
         # Variance check
         if is_free:
-            status   = '✅ Free Line-OK — $0'
-            diff_str = '—'
+            action = '✅ Approved — $0 (Free Line)'
         else:
-            diff     = dfa_total_impr - int(aj)
-            pct      = abs(diff) / max(int(aj), 1) * 100
-            diff_str = f"{diff:+,}"
+            diff = dfa_total_impr - int(aj)
+            pct  = abs(diff) / max(int(aj), 1) * 100
             if pct > 10:
                 warnings.append(
                     f"🚨 LINE {line_int}: DFA ({dfa_total_impr:,}) vs Internal AJ ({int(aj):,}) "
                     f"= {pct:.1f}% variance. Investigate before billing."
                 )
-                status = f'🚨 VARIANCE {pct:.1f}% — DO NOT BILL'
+                action = f'🚨 Investigate — {pct:.1f}% variance (do not bill)'
+            elif diff == 0:
+                action = '✅ Approved'
             else:
-                status = f'✅ OK — Using DFA  ({diff:+,} vs AJ)'
+                action = f'🔄 Adjusted — update AJ to {dfa_total_impr:,}'
 
         verification.append({
-            'Line':            line_int,
-            'Position':        pos_path,
-            'DFA Impressions': f"{dfa_total_impr:,}" + (' (Free)' if is_free else ''),
-            'Internal AJ':     f"{int(aj):,}",
-            'Difference':      diff_str,
-            'Billed $':        f"${dfa_total_cost:,.3f}",
-            'Status':          status,
+            'Line':     line_int,
+            'Position': pos_path,
+            'AJ':       f"{int(aj):,}",
+            'DFA / 1P': f"{dfa_total_impr:,}" + (' (Free)' if is_free else ''),
+            'Action':   action,
         })
 
         first = True
@@ -488,13 +482,7 @@ for i in range(st.session_state.num_campaigns):
             tag_file = st.file_uploader(
                 "Tag Mapping", type=["xlsx"], key=f"tag_{i}", label_visibility="collapsed"
             )
-        notes = st.text_area(
-            "Notes / Nuances",
-            key=f"notes_{i}",
-            placeholder="Any special instructions or flags for this campaign...",
-            height=75,
-        )
-        campaigns.append({"io": io_num, "dfa": dfa_file, "tag": tag_file, "notes": notes, "idx": i + 1})
+        campaigns.append({"io": io_num, "dfa": dfa_file, "tag": tag_file, "notes": "", "idx": i + 1})
 
 c_add, c_rem, _ = st.columns([1, 1, 6])
 with c_add:
@@ -548,9 +536,6 @@ if run:
                 if camp_name:
                     st.caption(f"**{camp_name}**")
 
-                if c["notes"].strip():
-                    st.info(f"📝 Notes: {c['notes'].strip()}")
-
                 has_blocker = False
                 for w in warnings:
                     if "🚨" in w:
@@ -560,7 +545,18 @@ if run:
                         st.warning(w)
 
                 st.markdown("**Billing Verification**")
-                st.dataframe(pd.DataFrame(verification), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    pd.DataFrame(verification),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Line":     st.column_config.NumberColumn("Line", width="small"),
+                        "Position": st.column_config.TextColumn("Position", width="large"),
+                        "AJ":       st.column_config.TextColumn("AJ (Current)", width="medium"),
+                        "DFA / 1P": st.column_config.TextColumn("DFA / 1P", width="medium"),
+                        "Action":   st.column_config.TextColumn("Action", width="medium"),
+                    }
+                )
 
                 total      = sum(r.get("media_cost", 0) or 0 for r in output_rows)
                 cross_check = dfa_raw_total + internal_1p_total
