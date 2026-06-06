@@ -46,6 +46,12 @@ def read_dfa_report(file):
     return metadata, data
 
 
+def _is_line_col(val):
+    """Match 'Line Item#', 'Line Item', 'Ad Book Line', 'AdBook Line', etc."""
+    v = str(val).lower().strip()
+    return bool(re.search(r'line.*(item|#)|ad\s*book\s*line', v))
+
+
 def read_tag_sheet(file):
     xl = pd.ExcelFile(file, engine='openpyxl')
 
@@ -60,7 +66,7 @@ def read_tag_sheet(file):
         for i, row in df_raw.iterrows():
             vals = [str(v).lower().strip() for v in row.values]
             has_pid  = 'placement id' in vals
-            has_line = any(re.search(r'line.*(item|#)', v) for v in vals)
+            has_line = any(_is_line_col(v) for v in vals)
             if has_pid and has_line:
                 chosen_sheet = sheet
                 chosen_hdr   = i
@@ -81,7 +87,7 @@ def read_tag_sheet(file):
     data = data.reset_index(drop=True)
 
     pid_col  = next((c for c in data.columns if str(c).lower().strip() == 'placement id'), None)
-    line_col = next((c for c in data.columns if re.search(r'line.*(item|#)', str(c).lower())), None)
+    line_col = next((c for c in data.columns if _is_line_col(c)), None)
     name_col = next((c for c in data.columns if 'placement name' in str(c).lower()), None)
 
     keep = [pid_col, line_col] + ([name_col] if name_col else [])
