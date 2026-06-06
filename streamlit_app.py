@@ -55,54 +55,56 @@ def _is_line_col(val):
 def read_tag_sheet(file):
     xl = pd.ExcelFile(file, engine='openpyxl')
 
-    # Find the sheet that actually contains Placement ID + a line item column
-    # (sheet name varies across clients — scan all sheets)
-    chosen_sheet = None
-    chosen_hdr   = None
+    # Collect placement→line mappings from ALL non-legacy sheets and merge.
+    # Tag files often split placements across 'Tracking Ads' and 'Tags' sheets —
+    # stopping at the first sheet would miss display placements in later sheets.
+    all_dfs = []
     for sheet in xl.sheet_names:
         if 'legacy' in sheet.lower():
             continue
         df_raw = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl', nrows=30)
+        chosen_hdr = None
         for i, row in df_raw.iterrows():
             vals = [str(v).lower().strip() for v in row.values]
-            has_pid  = 'placement id' in vals
-            has_line = any(_is_line_col(v) for v in vals)
-            if has_pid and has_line:
-                chosen_sheet = sheet
-                chosen_hdr   = i
+            if 'placement id' in vals and any(_is_line_col(v) for v in vals):
+                chosen_hdr = i
                 break
-        if chosen_sheet:
-            break
+        if chosen_hdr is None:
+            continue
 
-    if chosen_sheet is None:
+        df_raw  = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
+        headers = df_raw.iloc[chosen_hdr].tolist()
+        data    = df_raw.iloc[chosen_hdr + 1:].copy()
+        data.columns = headers
+        data = data.reset_index(drop=True)
+
+        pid_col  = next((c for c in data.columns if str(c).lower().strip() == 'placement id'), None)
+        line_col = next((c for c in data.columns if _is_line_col(c)), None)
+        name_col = next((c for c in data.columns if 'placement name' in str(c).lower()), None)
+        if not pid_col or not line_col:
+            continue
+
+        keep = [pid_col, line_col] + ([name_col] if name_col else [])
+        df   = data[keep].dropna(subset=[pid_col]).copy()
+        df.columns = ['placement_id', 'line_item'] + (['placement_name'] if name_col else [])
+
+        df['placement_id'] = df['placement_id'].apply(
+            lambda x: str(int(float(x))) if pd.notna(x) and str(x).replace('.', '').isdigit() else str(x).strip()
+        )
+        df['line_item'] = df['line_item'].apply(
+            lambda x: str(int(float(x))) if pd.notna(x) and str(x).replace('.', '').isdigit() else str(x).strip()
+        )
+        all_dfs.append(df)
+
+    if not all_dfs:
         raise ValueError(
             "Could not find a sheet with both 'Placement ID' and a Line Item column. "
             "Check that the correct tag mapping file was uploaded."
         )
 
-    df_raw  = pd.read_excel(file, sheet_name=chosen_sheet, header=None, engine='openpyxl')
-    headers = df_raw.iloc[chosen_hdr].tolist()
-    data    = df_raw.iloc[chosen_hdr + 1:].copy()
-    data.columns = headers
-    data = data.reset_index(drop=True)
-
-    pid_col  = next((c for c in data.columns if str(c).lower().strip() == 'placement id'), None)
-    line_col = next((c for c in data.columns if _is_line_col(c)), None)
-    name_col = next((c for c in data.columns if 'placement name' in str(c).lower()), None)
-
-    keep = [pid_col, line_col] + ([name_col] if name_col else [])
-    df   = data[keep].dropna(subset=[pid_col]).copy()
-    df.columns = ['placement_id', 'line_item'] + (['placement_name'] if name_col else [])
-
-    df['placement_id'] = df['placement_id'].apply(
-        lambda x: str(int(float(x))) if pd.notna(x) and str(x).replace('.', '').isdigit() else str(x).strip()
-    )
-    df['line_item'] = df['line_item'].apply(
-        lambda x: str(int(float(x))) if pd.notna(x) and str(x).replace('.', '').isdigit() else str(x).strip()
-    )
-    # Deduplicate — some tag sheets have multiple rows per placement (one per ad/creative)
-    df = df.drop_duplicates(subset=['placement_id']).reset_index(drop=True)
-    return df
+    combined = pd.concat(all_dfs, ignore_index=True)
+    combined = combined.drop_duplicates(subset=['placement_id']).reset_index(drop=True)
+    return combined
 
 
 def read_internal_billing(file, io_number):
@@ -175,6 +177,13 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
     # DFA placements not in tag sheet (e.g. 1x1 impression trackers)
     tagged_pids  = {str(r['placement_id']) for _, r in tag_df.iterrows()}
     untagged_dfa = {pid: info for pid, info in dfa_lookup.items() if pid not in tagged_pids}
+
+    # For DFA placements missing from the tag sheet, infer line from placement name
+    # (e.g. "...Line Item 2..." → line 2). Handles placements added after tag sheet was generated.
+    for pid, info in untagged_dfa.items():
+        m = re.search(r'line\s*item\s*(\d+)', info['name'], re.IGNORECASE)
+        if m:
+            line_to_pids.setdefault(str(int(m.group(1))), []).append(pid)
 
     rows_3p = []
     rows_1p = []
@@ -320,8 +329,12 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
             })
             first = False
 
+    # Cross-check totals: DFA raw total + 1P AK total should equal output grand total
+    dfa_raw_total      = sum(info['media_cost'] for info in dfa_lookup.values())
+    internal_1p_total  = billing_df[billing_df['position_path'].apply(is_first_party)]['final_invoicing_amt'].sum()
+
     # 3P lines first (sorted), then 1P lines at end
-    return rows_3p + rows_1p, verification, warnings
+    return rows_3p + rows_1p, verification, warnings, dfa_raw_total, internal_1p_total
 
 
 # ─── EXCEL GENERATOR ──────────────────────────────────────────────────────────
@@ -527,7 +540,7 @@ if run:
                     billing_file.seek(0)
                     billing_data       = read_internal_billing(billing_file, c["io"])
 
-                    output_rows, verification, warnings = process_campaign(
+                    output_rows, verification, warnings, dfa_raw_total, internal_1p_total = process_campaign(
                         dfa_meta, dfa_data, tag_data, billing_data, c["notes"]
                     )
 
@@ -549,8 +562,21 @@ if run:
                 st.markdown("**Billing Verification**")
                 st.dataframe(pd.DataFrame(verification), use_container_width=True, hide_index=True)
 
-                total = sum(r.get("media_cost", 0) or 0 for r in output_rows)
+                total      = sum(r.get("media_cost", 0) or 0 for r in output_rows)
+                cross_check = dfa_raw_total + internal_1p_total
+                match       = abs(cross_check - total) < 0.01
+
                 st.metric("Total Billed", f"${total:,.3f}")
+
+                with st.expander("🔢 Cross-Check Verification", expanded=True):
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("DFA Report Total (3P)", f"${dfa_raw_total:,.3f}")
+                    col2.metric("1P Internal AK Total", f"${internal_1p_total:,.3f}")
+                    col3.metric("Cross-Check Sum", f"${cross_check:,.3f}")
+                    if match:
+                        st.success("✅ Cross-check passed — DFA total + 1P AK total matches output grand total.")
+                    else:
+                        st.error(f"⚠️ Cross-check mismatch — expected ${cross_check:,.3f}, got ${total:,.3f}. A 3P line may have fallen back to 1P or been misrouted.")
 
                 if has_blocker:
                     st.error("⛔ Download blocked — resolve the flagged variance(s) above before billing.")
