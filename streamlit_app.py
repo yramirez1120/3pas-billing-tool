@@ -400,7 +400,8 @@ def generate_excel(output_rows, dfa_meta):
             cell = ws.cell(row=r, column=ci, value=val)
             cell.fill = fill
             cell.font = Font(size=9)
-            cell.alignment = Alignment(vertical="center", wrap_text=(ci == 2))
+            h_align = "center" if ci in (3, 5, 6) else None
+            cell.alignment = Alignment(horizontal=h_align, vertical="center", wrap_text=(ci == 2))
             if ci == 1 and val is not None: cell.number_format = '0'
             if ci in (4, 5) and val is not None: cell.number_format = '#,##0'
             if ci == 6 and val is not None:       cell.number_format = '$#,##0.00'
@@ -411,11 +412,14 @@ def generate_excel(output_rows, dfa_meta):
         if len(row_list) < 2:
             continue
         start_r, end_r = row_list[0], row_list[-1]
+        color = line_color_map.get(line_val)
         for col_idx, num_fmt in ((3, None), (5, '#,##0'), (6, '$#,##0.00')):
             ws.merge_cells(start_row=start_r, start_column=col_idx, end_row=end_r, end_column=col_idx)
             mc = ws.cell(row=start_r, column=col_idx)
-            mc.alignment = Alignment(horizontal="center", vertical="center")
+            mc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
             mc.font = Font(size=9)
+            if color:
+                mc.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
             if num_fmt:
                 mc.number_format = num_fmt
 
@@ -456,18 +460,18 @@ st.set_page_config(
 st.title("📊 3PAS Monthly Billing Report Generator")
 st.caption(
     "Generate client-facing billables reports from your 3P report, "
-    "tag mapping, and internal billing files."
+    "tag mapping, and billing consolidated report."
 )
 st.markdown("---")
 
-# Step 1 ── Internal Billing Report
-st.subheader("Step 1 — Internal Billing Report")
+# Step 1 ── Internal Billing Consolidated Report
+st.subheader("Step 1 — Internal Billing Consolidated Report")
 st.caption(
     "Upload the monthly consolidated billing report. "
     "This single file covers all campaigns you process below."
 )
 billing_file = st.file_uploader(
-    "Internal Billing Report (.xlsx)",
+    "Internal Billing Consolidated Report (.xlsx)",
     type=["xlsx"],
     key="billing",
     label_visibility="collapsed",
@@ -522,7 +526,7 @@ run = st.button("▶  Run Billing", type="primary", use_container_width=True)
 if run:
     errors = []
     if not billing_file:
-        errors.append("Upload the Internal Billing Report in Step 1.")
+        errors.append("Upload the Internal Billing Consolidated Report in Step 1.")
     for c in campaigns:
         if not c["io"].strip():
             errors.append(f"Campaign {c['idx']}: IO Number is required.")
