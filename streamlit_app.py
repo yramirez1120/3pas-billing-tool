@@ -133,6 +133,7 @@ def read_internal_billing(file, io_number):
         'line_item':           filtered.iloc[:, 6].apply(clean_id),
         'campaign_name':       filtered.iloc[:, 4].astype(str).str.strip(),
         'position_path':       filtered.iloc[:, 5].astype(str).str.strip(),
+        'price':               pd.to_numeric(filtered.iloc[:, 19], errors='coerce').fillna(0),  # Col T
         'impressions_sold':    pd.to_numeric(filtered.iloc[:, 20], errors='coerce').fillna(0),
         'discrepancy_flag':    filtered.iloc[:, 34].astype(str).str.strip(),
         'final_billable_impr': pd.to_numeric(filtered.iloc[:, 35], errors='coerce').fillna(0),
@@ -213,7 +214,7 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
 
         # 1st party: Mobile App or Interstitial
         if is_first_party(pos_path):
-            cpm_1p = round(ak / (aj / 1000), 2) if aj > 0 else 0
+            cpm_1p = float(bill['price']) if bill['price'] > 0 else 0
             rows_1p.append({
                 'placement_id':   None,
                 'placement_name': pos_path,
@@ -258,7 +259,7 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
                 f"ℹ️ LINE {line_int}: No DFA placements matched. "
                 "Falling back to internal AJ/AK."
             )
-            cpm_fb = round(ak / (aj / 1000), 2) if aj > 0 else 0
+            cpm_fb = float(bill['price']) if bill['price'] > 0 else 0
             rows_1p.append({
                 'placement_id':   None,
                 'placement_name': pos_path,
@@ -306,6 +307,18 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
             'DFA / 1P': f"{dfa_total_impr:,}" + (' (Free)' if is_free else ''),
             'Action':   action,
         })
+
+        # Cross-check 3P CPM against internal col T price — flag any mismatch
+        internal_price = float(bill['price'])
+        if internal_price > 0 and not is_free:
+            for pid in matched:
+                dfa_cpm = dfa_lookup[pid]['cpm']
+                if abs(dfa_cpm - internal_price) > 0.01:
+                    warnings.append(
+                        f"⚠️ LINE {line_int}: CPM mismatch — 3P report shows ${dfa_cpm:.2f}, "
+                        f"internal price (col T) is ${internal_price:.2f}. Verify before billing."
+                    )
+                    break  # one warning per line is enough
 
         first = True
         for pid in matched:
@@ -616,3 +629,4 @@ if run:
                 st.error(f"Error processing Campaign {c['idx']}: {str(e)}")
 
             st.markdown("---")
+
