@@ -400,12 +400,12 @@ def generate_excel(output_rows, dfa_meta):
             cell = ws.cell(row=r, column=ci, value=val)
             cell.fill = fill
             cell.font = Font(size=9)
-            h_align = "center" if ci in (3, 5, 6) else None
-            cell.alignment = Alignment(horizontal=h_align, vertical="center", wrap_text=(ci == 2))
             if ci == 1 and val is not None: cell.number_format = '0'
             if ci in (4, 5) and val is not None: cell.number_format = '#,##0'
             if ci == 6 and val is not None:       cell.number_format = '$#,##0.00'
             if ci == 7 and val is not None:       cell.number_format = '$#,##0.000'
+            h_align = "center" if ci in (3, 5, 6) else None
+            cell.alignment = Alignment(horizontal=h_align, vertical="center", wrap_text=(ci == 2))
 
     # Merge Line (C=3), Capped Impressions (E=5), CPM (F=6) for lines with multiple placements
     for line_val, row_list in line_groups.items():
