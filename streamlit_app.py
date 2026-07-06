@@ -18,7 +18,7 @@ def read_dfa_report(file):
             hdr_idx = i
             break
     if hdr_idx is None:
-        raise ValueError("Could not find column headers in DFA report. Make sure you uploaded the correct file.")
+        raise ValueError("Could not find column headers in the 3P report. Make sure you uploaded the correct file.")
 
     metadata = df_raw.iloc[:hdr_idx].copy()
     headers  = df_raw.iloc[hdr_idx].tolist()
@@ -141,11 +141,10 @@ def read_internal_billing(file, io_number):
     return result
 
 
-def build_filename(campaign_name, month):
-    """e.g. 'Visit Loudoun VA Spring 2026 Campaign', 'April' → 'VisitLoudounVASpring2026-April Billables.xlsx'"""
+def build_filename(campaign_name, month, io_number):
     clean = re.sub(r'\bCampaign\b', '', campaign_name, flags=re.IGNORECASE)
-    clean = re.sub(r'[^A-Za-z0-9]', '', clean)   # remove spaces and special chars
-    return f"{clean}-{month} Billables.xlsx"
+    clean = re.sub(r'[^A-Za-z0-9]', '', clean)
+    return f"{io_number}_{clean}-{month} Billables.xlsx"
 
 
 # ─── BILLING LOGIC ────────────────────────────────────────────────────────────
@@ -313,7 +312,7 @@ def process_campaign(dfa_meta, dfa_df, tag_df, billing_df, notes):
             info = dfa_lookup[pid]
             rows_3p.append({
                 'placement_id':   int(pid) if pid.isdigit() else pid,
-                'placement_name': info['name'],
+                'placement_name': pos_path,
                 'line':           line_int if first else None,
                 'impressions':    info['impressions'],
                 'capped':         capped if first else None,
@@ -344,20 +343,19 @@ def generate_excel(output_rows, dfa_meta):
     ws = wb.active
     ws.title = "Billables"
 
-    # DFA metadata rows
-    for r_idx, row in dfa_meta.iterrows():
+    # DFA metadata rows — blank rows skipped so they don't take up space
+    written = 0
+    for _, row in dfa_meta.iterrows():
+        row_vals = [v for v in row.values if pd.notna(v) and str(v).strip() not in ('', 'nan')]
+        if not row_vals:
+            continue
+        written += 1
         for c_idx, val in enumerate(row, 1):
             if pd.notna(val) and str(val).strip() not in ('', 'nan'):
-                cell = ws.cell(row=r_idx + 1, column=c_idx, value=val)
-                cell.font = Font(bold=(r_idx == 0), size=12 if r_idx == 0 else 9)
+                cell = ws.cell(row=written, column=c_idx, value=val)
+                cell.font = Font(bold=(written == 1), size=12 if written == 1 else 9)
 
-    meta_rows = len(dfa_meta)
-    lbl_row   = meta_rows + 1
-    hdr_row   = lbl_row + 1
-
-    # Report Fields / Metrics label row
-    ws.cell(row=lbl_row, column=1, value="Report Fields").font = Font(bold=True, size=9)
-    ws.cell(row=lbl_row, column=4, value="Report Metrics").font = Font(bold=True, size=9)
+    hdr_row = written + 1
 
     # Column headers
     HDR  = ["Placement ID", "Placement", "Line", "Impressions", "Capped Impressions total", "CPM", "Media Cost"]
@@ -368,6 +366,14 @@ def generate_excel(output_rows, dfa_meta):
         c.fill = hfil; c.font = hfnt
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[hdr_row].height = 30
+
+    # Pre-compute line groups: effective line value → list of Excel row numbers
+    line_groups = {}
+    cur = None
+    for r_off, row in enumerate(output_rows):
+        if row['line'] is not None:
+            cur = row['line']
+        line_groups.setdefault(cur, []).append(hdr_row + 1 + r_off)
 
     # Data rows
     line_color_map = {}
@@ -399,6 +405,19 @@ def generate_excel(output_rows, dfa_meta):
             if ci in (4, 5) and val is not None: cell.number_format = '#,##0'
             if ci == 6 and val is not None:       cell.number_format = '$#,##0.00'
             if ci == 7 and val is not None:       cell.number_format = '$#,##0.000'
+
+    # Merge Line (C=3), Capped Impressions (E=5), CPM (F=6) for lines with multiple placements
+    for line_val, row_list in line_groups.items():
+        if len(row_list) < 2:
+            continue
+        start_r, end_r = row_list[0], row_list[-1]
+        for col_idx, num_fmt in ((3, None), (5, '#,##0'), (6, '$#,##0.00')):
+            ws.merge_cells(start_row=start_r, start_column=col_idx, end_row=end_r, end_column=col_idx)
+            mc = ws.cell(row=start_r, column=col_idx)
+            mc.alignment = Alignment(horizontal="center", vertical="center")
+            mc.font = Font(size=9)
+            if num_fmt:
+                mc.number_format = num_fmt
 
     # Grand Total row
     total_row  = hdr_row + 1 + len(output_rows)
@@ -436,7 +455,7 @@ st.set_page_config(
 
 st.title("📊 3PAS Monthly Billing Report Generator")
 st.caption(
-    "Generate client-facing billables reports from your DFA report, "
+    "Generate client-facing billables reports from your 3P report, "
     "tag mapping, and internal billing files."
 )
 st.markdown("---")
@@ -473,9 +492,9 @@ for i in range(st.session_state.num_campaigns):
         )
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**DFA Report**")
+            st.markdown("**3P Report**")
             dfa_file = st.file_uploader(
-                "DFA Report", type=["xlsx"], key=f"dfa_{i}", label_visibility="collapsed"
+                "3P Report", type=["xlsx"], key=f"dfa_{i}", label_visibility="collapsed"
             )
         with col2:
             st.markdown("**Tag Mapping**")
@@ -508,7 +527,7 @@ if run:
         if not c["io"].strip():
             errors.append(f"Campaign {c['idx']}: IO Number is required.")
         if not c["dfa"]:
-            errors.append(f"Campaign {c['idx']}: DFA Report is required.")
+            errors.append(f"Campaign {c['idx']}: 3P Report is required.")
         if not c["tag"]:
             errors.append(f"Campaign {c['idx']}: Tag Mapping is required.")
 
@@ -566,7 +585,7 @@ if run:
 
                 with st.expander("🔢 Cross-Check Verification", expanded=True):
                     col1, col2, col3 = st.columns(3)
-                    col1.metric("DFA Report Total (3P)", f"${dfa_raw_total:,.3f}")
+                    col1.metric("3P Report Total", f"${dfa_raw_total:,.3f}")
                     col2.metric("1P Internal AK Total", f"${internal_1p_total:,.3f}")
                     col3.metric("Cross-Check Sum", f"${cross_check:,.3f}")
                     if match:
@@ -580,7 +599,7 @@ if run:
                     excel_bytes = generate_excel(output_rows, dfa_meta)
                     month       = billing_data["month"].iloc[0] if not billing_data.empty else "Unknown"
                     camp_nm     = billing_data["campaign_name"].iloc[0] if not billing_data.empty else c["io"]
-                    filename    = build_filename(camp_nm, month)
+                    filename    = build_filename(camp_nm, month, c["io"])
                     st.download_button(
                         label="⬇  Download Billables Report",
                         data=excel_bytes,
